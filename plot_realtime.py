@@ -2,7 +2,6 @@
 
 import argparse
 import collections
-import enum
 import json
 import socket
 import threading
@@ -11,7 +10,6 @@ from typing import NamedTuple
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib import animation
 
 
 class Rotation(NamedTuple):
@@ -63,13 +61,6 @@ class Measurement(NamedTuple):
         )
 
 
-class MeasType(enum.Enum):
-    temp = 0
-    rot = 1
-    gyro = 2
-    acc = 3
-
-
 class UdpListener:
     """Listen for data over UDP"""
     def __init__(self, port: int):
@@ -95,8 +86,7 @@ class DataPlotter:
 
     ROT = ["roll", "pitch"]
 
-    def __init__(self, meas_type: MeasType, port: int, window_s: int):
-        self._meas_type = meas_type
+    def __init__(self, port: int, window_s: int):
         self._window_s = window_s
         self._listener = UdpListener(port)
         self._start_time = time.time()
@@ -107,45 +97,55 @@ class DataPlotter:
         self._update_loop.start()
 
         # matplotlib stuff
-        self._fig = plt.figure(figsize=(19.2, 10.8), dpi=100)
-        self._ax = plt.axes()
-        self._lines = []
+        self._fig, ((self._acc_ax, self._rot_ax),
+                    (self._gyro_ax,
+                     self._empty)) = plt.subplots(2,
+                                                  2,
+                                                  figsize=(19.2, 10.8),
+                                                  dpi=100)
 
-        if self._meas_type in [MeasType.acc, MeasType.gyro]:
-            n_series = 3
-        elif self._meas_type == MeasType.rot:
-            n_series = 2
-        else:
-            n_series = 1
+        self._rot_lines = []
+        self._gyro_lines = []
+        self._acc_lines = []
 
-        for i in range(n_series):
-            if self._meas_type in [MeasType.acc, MeasType.gyro]:
-                axis = chr(ord("x") + i)
-                label = f"{self._meas_type.name}.{axis}"
-            elif self._meas_type == MeasType.rot:
-                label = self.ROT[i]
-            else:
-                label = self._meas_type.name
+        self._rot_series = 2
+        self._ga_series = 3
 
-            if self._meas_type == MeasType.temp:
-                y_label = "Temperature (C)"
-            elif self._meas_type == MeasType.rot:
-                y_label = "Rotation (rad)"
-            elif self._meas_type == MeasType.gyro:
-                y_label = "Gyro (rad/s)"
-            elif self._meas_type == MeasType.acc:
-                y_label = "Acceleration (m/s^2)"
-            else:
-                raise NotImplementedError
+        fontsize = 24
+        legend_fontsize = 16
+        x_label = "Time since start (s)"
+        for i in range(self._rot_series):
+            rot_label = self.ROT[i]
+            self._rot_lines.append(
+                self._rot_ax.plot([], [], label=rot_label)[0])
+            self._rot_ax.set_xlabel(x_label, fontsize=fontsize)
+            self._rot_ax.set_ylabel("Rotation (rad)", fontsize=fontsize)
+            self._rot_ax.set_xlim([0, self._window_s])
+            self._rot_ax.legend(loc="upper left", fontsize=legend_fontsize)
 
-            self._lines.append(self._ax.plot([], [], label=label)[0])
+        for i in range(self._ga_series):
+            axis = chr(ord("x") + i)
+            gyro_label = f"gyro.{axis}"
+            acc_label = f"acc.{axis}"
 
-        self._ax.legend(loc="upper left", fontsize=20)
-        fontsize = 32
-        self._ax.set_xlabel("Time since start (s)", fontsize=fontsize)
-        self._ax.set_ylabel(y_label, fontsize=fontsize)
-        self._ax.set_title("MPU-6050 Time Series", fontsize=fontsize)
-        self._ax.set_xlim([0, self._window_s])
+            self._gyro_lines.append(
+                self._gyro_ax.plot([], [], label=gyro_label)[0])
+            self._gyro_ax.set_xlabel(x_label, fontsize=fontsize)
+            self._gyro_ax.set_ylabel("Gyro (rad/s)", fontsize=fontsize)
+            self._gyro_ax.set_xlim([0, self._window_s])
+            self._gyro_ax.legend(loc="upper left", fontsize=legend_fontsize)
+
+            self._acc_lines.append(
+                self._acc_ax.plot([], [], label=acc_label)[0])
+            self._acc_ax.set_xlabel(x_label, fontsize=fontsize)
+            self._acc_ax.set_ylabel("Acceleration (m/s^2)", fontsize=fontsize)
+            self._acc_ax.set_xlim([0, self._window_s])
+            self._acc_ax.legend(loc="upper left", fontsize=legend_fontsize)
+
+        self._empty.axis("off")
+        self._fig.canvas.set_window_title("MPU-6050")
+        self._fig.suptitle("MPU-6050 Time Series", fontsize=fontsize)
+        self._fig.tight_layout()
 
     def _update_data(self):
         while True:
@@ -166,6 +166,23 @@ class DataPlotter:
                 break
 
     def update(self):
+        def _update_subplot(ax, timeseries, lines):
+            assert len(timeseries) == len(lines)
+            for (line, data) in zip(lines, timeseries):
+                line.set_xdata(timestamp)
+                line.set_ydata(data)
+
+            if timestamp[-1] >= self._window_s:
+                ax.set_xlim([timestamp[0], timestamp[-1]])
+            else:
+                ax.set_xlim([0, self._window_s])
+
+            min_y = np.min(timeseries)
+            min_y -= 0.1 * np.abs(min_y)
+            max_y = np.max(timeseries)
+            max_y += 0.1 * np.abs(max_y)
+            ax.set_ylim([min_y, max_y])
+
         with self._lock:
             data = list(self._data)
 
@@ -173,52 +190,25 @@ class DataPlotter:
             return
 
         timestamp = np.array([d.timestamp - self._start_time for d in data])
-        if self._meas_type in [MeasType.acc, MeasType.gyro]:
-            timeseries = np.array([
-                np.array([
-                    d.__getattribute__(self._meas_type.name).x for d in data
-                ]),
-                np.array([
-                    d.__getattribute__(self._meas_type.name).y for d in data
-                ]),
-                np.array([
-                    d.__getattribute__(self._meas_type.name).z for d in data
-                ]),
-            ])
-        elif self._meas_type == MeasType.rot:
-            timeseries = []
-            for name in self.ROT:
-                timeseries.append(
-                    np.array([
-                        d.__getattribute__(
-                            self._meas_type.name).__getattribute__(name)
-                        for d in data
-                    ]))
-            timeseries = np.array(timeseries)
-        else:
-            timeseries = np.array([
-                np.array(
-                    [d.__getattribute__(self._meas_type.name) for d in data]),
-            ])
 
-        if self._meas_type == MeasType.acc:
-            timeseries *= -9.8
+        acc_timeseries = -9.8 * np.array([
+            np.array([d.acc.x for d in data]),
+            np.array([d.acc.y for d in data]),
+            np.array([d.acc.z for d in data]),
+        ])
+        gyro_timeseries = np.array([
+            np.array([d.gyro.x for d in data]),
+            np.array([d.gyro.y for d in data]),
+            np.array([d.gyro.z for d in data]),
+        ])
+        rot_timeseries = np.array([
+            np.array([d.rot.roll for d in data]),
+            np.array([d.rot.pitch for d in data]),
+        ])
 
-        assert len(timeseries) == len(self._lines)
-        for (line, data) in zip(self._lines, timeseries):
-            line.set_xdata(timestamp)
-            line.set_ydata(data)
-
-        if timestamp[-1] >= self._window_s:
-            self._ax.set_xlim([timestamp[0], timestamp[-1]])
-        else:
-            self._ax.set_xlim([0, self._window_s])
-
-        min_y = np.min(timeseries)
-        min_y -= 0.1 * np.abs(min_y)
-        max_y = np.max(timeseries)
-        max_y += 0.1 * np.abs(max_y)
-        self._ax.set_ylim([min_y, max_y])
+        _update_subplot(self._rot_ax, rot_timeseries, self._rot_lines)
+        _update_subplot(self._gyro_ax, gyro_timeseries, self._gyro_lines)
+        _update_subplot(self._acc_ax, acc_timeseries, self._acc_lines)
 
         self._fig.canvas.draw()
 
@@ -228,13 +218,6 @@ class DataPlotter:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-m",
-        "--measurement",
-        choices=[m.name for m in list(MeasType)],
-        required=True,
-        help="The measurement type to view.",
-    )
     parser.add_argument(
         "-p",
         "--port",
@@ -246,6 +229,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     plt.ion()
-    plotter = DataPlotter(MeasType[args.measurement], args.port, 10)
+    plotter = DataPlotter(args.port, 10)
     while True:
         plotter.update()
